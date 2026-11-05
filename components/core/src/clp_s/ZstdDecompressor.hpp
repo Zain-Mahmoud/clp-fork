@@ -3,14 +3,15 @@
 #ifndef CLP_S_ZSTDDECOMPRESSOR_HPP
 #define CLP_S_ZSTDDECOMPRESSOR_HPP
 
+#include <array>
 #include <optional>
 #include <string>
-
-#include <zstd.h>
+#include <vector>
 
 #include "../clp/ReaderInterface.hpp"
 #include "../clp/ReadOnlyMemoryMappedFile.hpp"
 #include "Decompressor.hpp"
+#include "DpkDeflate.hpp"
 #include "TraceableException.hpp"
 
 namespace clp_s {
@@ -26,7 +27,7 @@ public:
 
     // Constructor
     /**
-     * @throw Decompressor::OperationFailed if zstd decompressor stream cannot be initialized
+     * Decompresses the block-DEFLATE format written by ZstdCompressor on the BF-3 via dpKernels
      */
     ZstdDecompressor();
 
@@ -123,25 +124,45 @@ private:
      */
     void reset_stream();
 
+    ErrorCode read_compressed(char* dst, size_t num_bytes, size_t& num_bytes_read);
+
+    ErrorCode submit_next_block();
+
+    ErrorCode next_block();
+
+    void discard_blocks();
+
     // Variables
     InputType m_input_type;
-
-    // Compressed stream variables
-    ZSTD_DStream* m_decompression_stream;
 
     std::optional<clp::ReadOnlyMemoryMappedFile> m_memory_mapped_file;
     FileReader* m_file_reader;
     clp::ReaderInterface* m_reader;
     size_t m_file_reader_initial_pos;
-    std::unique_ptr<char[]> m_file_read_buffer;
-    size_t m_file_read_buffer_length;
-    size_t m_file_read_buffer_capacity;
 
-    ZSTD_inBuffer m_compressed_stream_block{};
+    // In-memory input (CompressedDataBuf / MemoryMappedCompressedFile)
+    char const* m_compressed_buf{nullptr};
+    size_t m_compressed_buf_size{0};
+    size_t m_compressed_buf_pos{0};
 
     size_t m_decompressed_stream_pos;
-    size_t m_unused_decompressed_stream_block_size;
-    std::unique_ptr<char[]> m_unused_decompressed_stream_block_buffer;
+
+    // DEFLATE blocks: up to cReadAhead are submitted to dpKernels ahead of the one being read.
+    static constexpr size_t cReadAhead = 4;
+
+    struct Block {
+        DpkDeflateJob job;
+        std::vector<char> data;
+    };
+
+    std::vector<char> m_compressed_block;
+    std::array<Block, cReadAhead> m_blocks;
+    size_t m_blocks_head{0};  // oldest submitted block
+    size_t m_blocks_count{0};  // number of submitted blocks, starting at the head
+    bool m_end_of_stream{false};
+    char const* m_block{nullptr};  // the head block's data, once the caller is reading it
+    size_t m_block_size{0};
+    size_t m_block_pos{0};
 };
 
 template <typename ValueType>

@@ -122,6 +122,8 @@ set(
         ../TimestampPattern.hpp
         ../Utils.cpp
         ../Utils.hpp
+        ../DpkDeflate.cpp
+        ../DpkDeflate.hpp
         ../ZstdCompressor.cpp
         ../ZstdCompressor.hpp
         ../ZstdDecompressor.cpp
@@ -145,6 +147,7 @@ if(CLP_BUILD_EXECUTABLES)
                 Boost::program_options Boost::url
                 ${CURL_LIBRARIES}
                 clp::string_utils
+                clp_s_dpk
                 clp_s::timestamp_parser
                 date::date
                 LibArchive::LibArchive

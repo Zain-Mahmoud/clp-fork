@@ -1,3 +1,19 @@
+# ZstdCompressor/ZstdDecompressor use DEFLATE: libdeflate to compress, and dpKernels to decompress
+# on the BlueField-3 hardware engine.
+set(CLP_S_DPK_ROOT "$ENV{HOME}/DP-Kernels" CACHE PATH "Path to a built DP-Kernels checkout")
+find_library(
+        DPK_EMBED_RUNTIME
+        dpk_embed_runtime
+        PATHS "${CLP_S_DPK_ROOT}/build"
+        NO_DEFAULT_PATH
+        REQUIRED
+)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBDEFLATE REQUIRED IMPORTED_TARGET libdeflate)
+add_library(clp_s_dpk INTERFACE)
+target_include_directories(clp_s_dpk INTERFACE "${CLP_S_DPK_ROOT}/DPManager")
+target_link_libraries(clp_s_dpk INTERFACE "${DPK_EMBED_RUNTIME}" PkgConfig::LIBDEFLATE)
+
 add_subdirectory(ffi)
 add_subdirectory(filter)
 add_subdirectory(indexer)
@@ -247,6 +263,8 @@ set(
         TraceableException.hpp
         Utils.cpp
         Utils.hpp
+        DpkDeflate.cpp
+        DpkDeflate.hpp
         ZstdCompressor.cpp
         ZstdCompressor.hpp
         ZstdDecompressor.cpp
@@ -270,6 +288,7 @@ if(CLP_BUILD_CLP_S_IO)
         target_link_libraries(
                 clp_s_io
                 PUBLIC
+                clp_s_dpk
                 simdjson::simdjson
                 zstd::libzstd_static
                 PRIVATE

@@ -3,11 +3,9 @@
 #ifndef CLP_S_ZSTDCOMPRESSOR_HPP
 #define CLP_S_ZSTDCOMPRESSOR_HPP
 
-#include <memory>
+#include <cstddef>
 #include <string>
-
-#include <zstd.h>
-#include <zstd_errors.h>
+#include <vector>
 
 #include "Compressor.hpp"
 #include "FileWriter.hpp"
@@ -15,6 +13,9 @@
 
 namespace clp_s {
 constexpr int cDefaultCompressionLevel = 3;
+// Uncompressed size of each DEFLATE block. Must not exceed the BF-3 engine's max buffer size
+// (printed by dpKernels at startup as [BF3-DECOMP-CAP] max_buf_size).
+constexpr size_t cDeflateBlockSize = 64 * 1024;
 
 class ZstdCompressor : public Compressor {
 public:
@@ -83,12 +84,13 @@ private:
     // Variables
     FileWriter* m_compressed_stream_file_writer{};
 
-    // Compressed stream variables
-    ZSTD_CStream* m_compression_stream;
-    bool m_compression_stream_contains_data;
+    // DEFLATE blocks (see ZstdCompressor.cpp for the format)
+    void compress_block();
 
-    ZSTD_outBuffer m_compressed_stream_block{};
-    std::unique_ptr<char[]> m_compressed_stream_block_buffer;
+    int m_compression_level{cDefaultCompressionLevel};
+    std::vector<char> m_block;
+    size_t m_block_size{0};
+    std::vector<char> m_compressed_block;
 
     size_t m_uncompressed_stream_pos{};
 };
