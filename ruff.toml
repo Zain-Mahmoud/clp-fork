@@ -1,0 +1,1 @@
+extend = "tools/yscope-dev-utils/exports/lint-configs/python/ruff.toml"
