@@ -5,8 +5,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 #include <dpk_embed_c_api.h>
+#include <libdeflate.h>
 #include <spdlog/spdlog.h>
 #include <unistd.h>
 
@@ -25,6 +27,53 @@ constexpr uint32_t cTimeoutMs = 10'000;
 char* g_region = nullptr;
 dpk_embed_task_handle* g_task = nullptr;
 std::mutex g_mutex;
+
+// CLP_S_DPK_VERIFY=1 (debugging): also decompress every block with libdeflate and report blocks
+// where dpKernels' output differs. The (correct) software output is then used.
+bool const g_verify = nullptr != std::getenv("CLP_S_DPK_VERIFY");
+uint64_t g_blocks = 0;
+uint64_t g_mismatches = 0;
+
+void verify(char const* in, size_t in_size, char* out, size_t out_size) {
+    static libdeflate_decompressor* decompressor = libdeflate_alloc_decompressor();
+    static std::vector<char> expected;
+    expected.resize(out_size);
+    size_t actual = 0;
+    ++g_blocks;
+    if (LIBDEFLATE_SUCCESS
+                != libdeflate_deflate_decompress(
+                        decompressor,
+                        in,
+                        in_size,
+                        expected.data(),
+                        out_size,
+                        &actual
+                )
+        || actual != out_size || 0 == std::memcmp(expected.data(), out, out_size))
+    {
+        return;
+    }
+    size_t first = 0;
+    size_t num_diff = 0;
+    for (size_t i = out_size; i-- > 0;) {
+        if (expected[i] != out[i]) {
+            first = i;
+            ++num_diff;
+        }
+    }
+    if (++g_mismatches <= 20) {
+        std::fprintf(
+                stderr,
+                "[clp-s dpk verify] block %llu: %zu -> %zu bytes, %zu bytes differ, first at %zu\n",
+                static_cast<unsigned long long>(g_blocks),
+                in_size,
+                out_size,
+                num_diff,
+                first
+        );
+    }
+    std::memcpy(out, expected.data(), out_size);
+}
 
 bool start_dpk() {
     g_region = static_cast<char*>(std::aligned_alloc(4096, cRegionSize));
@@ -46,6 +95,16 @@ bool start_dpk() {
     dup2(saved_stdout, STDOUT_FILENO);
     close(saved_stdout);
 
+    if (g_verify) {
+        std::atexit([] {
+            std::fprintf(
+                    stderr,
+                    "[clp-s dpk verify] %llu blocks, %llu differed from software decompression\n",
+                    static_cast<unsigned long long>(g_blocks),
+                    static_cast<unsigned long long>(g_mismatches)
+            );
+        });
+    }
     // No dpk_embed_runtime_stop() at exit: it hangs in the BF-3 kernel's cleanup, which waits for
     // the DOCA contexts to drain. The OS frees the runtime's memory and device handles on exit.
     return 0 == rc && 0 == dpk_embed_task_create(DPK_EMBED_STAGE_DECOMPRESS_DEFLATE, &g_task)
@@ -88,6 +147,9 @@ bool dpk_deflate_decompress(char const* in, size_t in_size, char* out, size_t ou
         return false;
     }
     std::memcpy(out, hw_out, out_size);
+    if (g_verify) {
+        verify(hw_in, in_size, out, out_size);
+    }
     return true;
 }
 }  // namespace clp_s
