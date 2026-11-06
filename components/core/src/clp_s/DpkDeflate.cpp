@@ -62,7 +62,8 @@ bool start_dpk() {
     if (0 != rc) {
         return false;
     }
-    std::atexit([] { dpk_embed_runtime_stop(); });
+    // No dpk_embed_runtime_stop() at exit: it hangs in the BF-3 kernel's cleanup, which waits for
+    // the DOCA contexts to drain. The OS frees the runtime's memory and device handles on exit.
 
     g_slots.resize(num_slots);
     for (size_t i = 0; i < num_slots; ++i) {
