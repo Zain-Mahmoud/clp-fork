@@ -3,7 +3,6 @@
 #ifndef CLP_S_ZSTDDECOMPRESSOR_HPP
 #define CLP_S_ZSTDDECOMPRESSOR_HPP
 
-#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -11,7 +10,6 @@
 #include "../clp/ReaderInterface.hpp"
 #include "../clp/ReadOnlyMemoryMappedFile.hpp"
 #include "Decompressor.hpp"
-#include "DpkDeflate.hpp"
 #include "TraceableException.hpp"
 
 namespace clp_s {
@@ -126,11 +124,7 @@ private:
 
     ErrorCode read_compressed(char* dst, size_t num_bytes, size_t& num_bytes_read);
 
-    ErrorCode submit_next_block();
-
-    ErrorCode next_block();
-
-    void discard_blocks();
+    ErrorCode load_block();
 
     // Variables
     InputType m_input_type;
@@ -147,20 +141,9 @@ private:
 
     size_t m_decompressed_stream_pos;
 
-    // DEFLATE blocks: up to cReadAhead are submitted to dpKernels ahead of the one being read.
-    static constexpr size_t cReadAhead = 4;
-
-    struct Block {
-        DpkDeflateJob job;
-        std::vector<char> data;
-    };
-
+    // Current DEFLATE block
     std::vector<char> m_compressed_block;
-    std::array<Block, cReadAhead> m_blocks;
-    size_t m_blocks_head{0};  // oldest submitted block
-    size_t m_blocks_count{0};  // number of submitted blocks, starting at the head
-    bool m_end_of_stream{false};
-    char const* m_block{nullptr};  // the head block's data, once the caller is reading it
+    std::vector<char> m_block;
     size_t m_block_size{0};
     size_t m_block_pos{0};
 };

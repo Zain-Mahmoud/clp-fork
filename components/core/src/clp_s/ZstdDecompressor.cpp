@@ -1,9 +1,8 @@
 // Code from CLP
 //
 // Reads the block-DEFLATE format written by ZstdCompressor (see ZstdCompressor.cpp) and
-// decompresses each block on the BlueField-3 decompression engine through dpKernels. Up to
-// cReadAhead blocks are submitted at once, so the engine works on the next blocks while the caller
-// reads the current one.
+// decompresses each block on the BlueField-3 decompression engine through dpKernels, one block at
+// a time.
 #include "ZstdDecompressor.hpp"
 
 #include <algorithm>
@@ -13,6 +12,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include "DpkDeflate.hpp"
 #include "ZstdCompressor.hpp"
 
 
@@ -25,9 +25,7 @@ ZstdDecompressor::ZstdDecompressor()
           m_file_reader_initial_pos(0),
           m_decompressed_stream_pos(0) {}
 
-ZstdDecompressor::~ZstdDecompressor() {
-    discard_blocks();
-}
+ZstdDecompressor::~ZstdDecompressor() = default;
 
 ErrorCode
 ZstdDecompressor::read_compressed(char* dst, size_t num_bytes, size_t& num_bytes_read) {
@@ -76,7 +74,7 @@ ZstdDecompressor::read_compressed(char* dst, size_t num_bytes, size_t& num_bytes
     return ErrorCodeSuccess;
 }
 
-ErrorCode ZstdDecompressor::submit_next_block() {
+ErrorCode ZstdDecompressor::load_block() {
     uint32_t header[2];
     size_t n = 0;
     if (auto rc = read_compressed(reinterpret_cast<char*>(header), sizeof(header), n);
@@ -84,7 +82,8 @@ ErrorCode ZstdDecompressor::submit_next_block() {
     {
         return rc;
     }
-    if (0 == n || (0 == header[0] && 0 == header[1])) {
+    // No more data, or the [0][0] end-of-stream header.
+    if (0 == n || (sizeof(header) == n && 0 == header[0] && 0 == header[1])) {
         return ErrorCodeEndOfFile;
     }
     size_t const uncompressed_size = header[0];
@@ -102,75 +101,25 @@ ErrorCode ZstdDecompressor::submit_next_block() {
         return ErrorCodeFailure;
     }
 
-    auto& block = m_blocks[(m_blocks_head + m_blocks_count) % cReadAhead];
-    block.data.resize(uncompressed_size);
+    m_block.resize(uncompressed_size);
     if (false
-        == dpk_deflate_submit(
-                block.job,
+        == dpk_deflate_decompress(
                 m_compressed_block.data(),
                 compressed_size,
-                block.data.data(),
+                m_block.data(),
                 uncompressed_size
         ))
     {
         SPDLOG_ERROR(
-                "ZstdDecompressor: dpKernels failed to submit a {} -> {} byte block",
+                "ZstdDecompressor: dpKernels failed to decompress a {} -> {} byte block",
                 compressed_size,
                 uncompressed_size
         );
         return ErrorCodeFailure;
     }
-    ++m_blocks_count;
-    return ErrorCodeSuccess;
-}
-
-ErrorCode ZstdDecompressor::next_block() {
-    // Done with the current block: free its place in the ring.
-    if (nullptr != m_block) {
-        m_blocks_head = (m_blocks_head + 1) % cReadAhead;
-        --m_blocks_count;
-        m_block = nullptr;
-    }
-
-    // Keep the ring full.
-    while (m_blocks_count < cReadAhead && false == m_end_of_stream) {
-        auto const rc = submit_next_block();
-        if (ErrorCodeEndOfFile == rc) {
-            m_end_of_stream = true;
-        } else if (ErrorCodeSuccess != rc) {
-            return rc;
-        }
-    }
-    if (0 == m_blocks_count) {
-        return ErrorCodeEndOfFile;
-    }
-
-    auto& block = m_blocks[m_blocks_head];
-    if (false == dpk_deflate_wait(block.job)) {
-        SPDLOG_ERROR(
-                "ZstdDecompressor: dpKernels failed to decompress a block to {} bytes",
-                block.data.size()
-        );
-        return ErrorCodeFailure;
-    }
-    m_block = block.data.data();
-    m_block_size = block.data.size();
+    m_block_size = uncompressed_size;
     m_block_pos = 0;
     return ErrorCodeSuccess;
-}
-
-void ZstdDecompressor::discard_blocks() {
-    for (auto& block : m_blocks) {
-        if (DpkDeflateJob::State::Pending == block.job.state) {
-            dpk_deflate_wait(block.job);
-        }
-    }
-    m_blocks_head = 0;
-    m_blocks_count = 0;
-    m_end_of_stream = false;
-    m_block = nullptr;
-    m_block_size = 0;
-    m_block_pos = 0;
 }
 
 ErrorCode
@@ -186,7 +135,7 @@ ZstdDecompressor::try_read(char const* buf, size_t num_bytes_to_read, size_t& nu
     num_bytes_read = 0;
     while (num_bytes_read < num_bytes_to_read) {
         if (m_block_pos == m_block_size) {
-            auto const rc = next_block();
+            auto const rc = load_block();
             if (ErrorCodeEndOfFile == rc) {
                 break;
             }
@@ -197,7 +146,7 @@ ZstdDecompressor::try_read(char const* buf, size_t num_bytes_to_read, size_t& nu
         }
         size_t const n
                 = std::min(num_bytes_to_read - num_bytes_read, m_block_size - m_block_pos);
-        std::memcpy(dst + num_bytes_read, m_block + m_block_pos, n);
+        std::memcpy(dst + num_bytes_read, m_block.data() + m_block_pos, n);
         m_block_pos += n;
         num_bytes_read += n;
     }
@@ -275,7 +224,7 @@ void ZstdDecompressor::close() {
         default:
             throw OperationFailed(ErrorCodeUnsupported, __FILENAME__, __LINE__);
     }
-    discard_blocks();
+    m_block_pos = m_block_size = 0;
     m_input_type = InputType::NotInitialized;
 }
 
@@ -285,7 +234,7 @@ void ZstdDecompressor::close_for_reuse() {
         return;
     }
     m_file_reader = nullptr;
-    discard_blocks();
+    m_block_pos = m_block_size = 0;
     m_input_type = InputType::NotInitialized;
 }
 
@@ -336,6 +285,6 @@ void ZstdDecompressor::reset_stream() {
     }
     m_decompressed_stream_pos = 0;
     m_compressed_buf_pos = 0;
-    discard_blocks();
+    m_block_pos = m_block_size = 0;
 }
 }  // namespace clp_s
