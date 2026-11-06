@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <mutex>
 #include <vector>
 
@@ -86,15 +87,37 @@ bool start_dpk() {
     config.enable_thread_pinning = 0;
     config.startup_timeout_ms = 30'000;
 
-    // dpKernels logs with printf; send that to stderr so it doesn't mix with clp-s's output.
+    // dpKernels logs with printf, partly from its own threads; send that to stderr so it doesn't
+    // mix with clp-s's results. Its threads may still be starting (and printing) after
+    // dpk_embed_runtime_start() returns, so keep the redirect until a task is prepared on every
+    // submit thread: each prepare waits for that thread to answer.
     std::fflush(stdout);
     int const saved_stdout = dup(STDOUT_FILENO);
     dup2(STDERR_FILENO, STDOUT_FILENO);
-    int const rc = dpk_embed_runtime_start(&config);
+    bool ok = 0 == dpk_embed_runtime_start(&config)
+              && 0 == dpk_embed_task_create(DPK_EMBED_STAGE_DECOMPRESS_DEFLATE, &g_task)
+              && 0 == dpk_embed_task_bind_io_region(
+                      g_task,
+                      reinterpret_cast<uint64_t>(g_region),
+                      static_cast<uint32_t>(cRegionSize)
+              );
+    int const num_threads = ok ? dpk_embed_get_max_submit_threads() : 0;
+    for (int i = 0; ok && i < num_threads; ++i) {
+        ok = 0 == dpk_embed_task_prepare_for_thread(g_task, static_cast<uint32_t>(i));
+    }
     std::fflush(stdout);
     dup2(saved_stdout, STDOUT_FILENO);
     close(saved_stdout);
 
+    // No dpk_embed_runtime_stop() at exit: it hangs in the BF-3 kernel's cleanup, which waits for
+    // the DOCA contexts to drain. Instead the OS frees the runtime's memory and device handles.
+    // dpKernels' threads keep running while the process exits and can crash it during teardown,
+    // which would lose clp-s's still-buffered output. This handler is registered after clp-s's
+    // own globals exist, so it runs before they're torn down: write everything out first.
+    std::atexit([] {
+        std::cout.flush();
+        std::fflush(nullptr);
+    });
     if (g_verify) {
         std::atexit([] {
             std::fprintf(
@@ -105,15 +128,7 @@ bool start_dpk() {
             );
         });
     }
-    // No dpk_embed_runtime_stop() at exit: it hangs in the BF-3 kernel's cleanup, which waits for
-    // the DOCA contexts to drain. The OS frees the runtime's memory and device handles on exit.
-    return 0 == rc && 0 == dpk_embed_task_create(DPK_EMBED_STAGE_DECOMPRESS_DEFLATE, &g_task)
-           && 0 == dpk_embed_task_bind_io_region(
-                   g_task,
-                   reinterpret_cast<uint64_t>(g_region),
-                   static_cast<uint32_t>(cRegionSize)
-           )
-           && 0 == dpk_embed_task_prepare_for_thread(g_task, cSubmitThread);
+    return ok;
 }
 }  // namespace
 
