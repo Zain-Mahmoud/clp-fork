@@ -26,6 +26,7 @@ constexpr uint32_t cSubmitThread = 0;
 constexpr uint32_t cTimeoutMs = 10'000;
 
 char* g_region = nullptr;
+bool g_started = false;  // whether dpKernels' runtime (and its threads) started
 dpk_embed_task_handle* g_task = nullptr;
 std::mutex g_mutex;
 
@@ -94,7 +95,8 @@ bool start_dpk() {
     std::fflush(stdout);
     int const saved_stdout = dup(STDOUT_FILENO);
     dup2(STDERR_FILENO, STDOUT_FILENO);
-    bool ok = 0 == dpk_embed_runtime_start(&config)
+    g_started = 0 == dpk_embed_runtime_start(&config);
+    bool ok = g_started
               && 0 == dpk_embed_task_create(DPK_EMBED_STAGE_DECOMPRESS_DEFLATE, &g_task)
               && 0 == dpk_embed_task_bind_io_region(
                       g_task,
@@ -109,25 +111,6 @@ bool start_dpk() {
     dup2(saved_stdout, STDOUT_FILENO);
     close(saved_stdout);
 
-    // No dpk_embed_runtime_stop() at exit: it hangs in the BF-3 kernel's cleanup, which waits for
-    // the DOCA contexts to drain. Instead the OS frees the runtime's memory and device handles.
-    // dpKernels' threads keep running while the process exits and can crash it during teardown,
-    // which would lose clp-s's still-buffered output. This handler is registered after clp-s's
-    // own globals exist, so it runs before they're torn down: write everything out first.
-    std::atexit([] {
-        std::cout.flush();
-        std::fflush(nullptr);
-    });
-    if (g_verify) {
-        std::atexit([] {
-            std::fprintf(
-                    stderr,
-                    "[clp-s dpk verify] %llu blocks, %llu differed from software decompression\n",
-                    static_cast<unsigned long long>(g_blocks),
-                    static_cast<unsigned long long>(g_mismatches)
-            );
-        });
-    }
     return ok;
 }
 }  // namespace
@@ -166,5 +149,23 @@ bool dpk_deflate_decompress(char const* in, size_t in_size, char* out, size_t ou
         verify(hw_in, in_size, out, out_size);
     }
     return true;
+}
+
+void dpk_deflate_exit_if_started(int exit_code) {
+    if (false == g_started) {
+        return;
+    }
+    if (g_verify) {
+        std::fprintf(
+                stderr,
+                "[clp-s dpk verify] %llu blocks, %llu differed from software decompression\n",
+                static_cast<unsigned long long>(g_blocks),
+                static_cast<unsigned long long>(g_mismatches)
+        );
+    }
+    std::cout.flush();
+    std::cerr.flush();
+    std::fflush(nullptr);
+    _exit(exit_code);
 }
 }  // namespace clp_s
