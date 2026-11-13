@@ -115,9 +115,21 @@ bool connect_dpk() {
     dup2(STDERR_FILENO, STDOUT_FILENO);
     bool ok = dpm_frontend_initialize() && app_alloc_task_request(&g_task);
     if (ok) {
+        // the same setup as dpKernels' embedded API (dpk_embed_task_prepare_for_thread)
         g_task->base.task = TASK_DECOMPRESS_DEFLATE;
         g_task->base.device = DEVICE_NONE;
-        dpm_mem_req* req = dpm_alloc_mem_buf_async(cBufIn, cBufOut, g_task);
+        g_task->bf3.callback_owner_thread_id = cSubmitThread;  // DPM thread that handles our tasks
+        // reuse the same DOCA buffers for every block, only updating their data
+        dpm_set_task_lazy_bind_mode(g_task, true);
+        dpm_mem_req* req = dpm_alloc_mem_buf_async_on_thread(cBufIn, cBufOut, g_task, cSubmitThread);
+        ok = nullptr != req && DPK_SUCCESS == wait_for(req->completion);
+    }
+    if (ok) {
+        g_in = g_task->base.in;
+        g_out = g_task->base.out;
+        // the BF-3 kernel only runs tasks that have a DOCA task preallocated for them
+        g_task->bf3.callback_owner_thread_id = cSubmitThread;
+        dpm_mem_req* req = dpm_alloc_task_async_on_thread(g_task, cSubmitThread);
         ok = nullptr != req && DPK_SUCCESS == wait_for(req->completion);
     }
     std::fflush(stdout);
@@ -128,10 +140,6 @@ bool connect_dpk() {
         return false;
     }
 
-    g_in = g_task->base.in;
-    g_out = g_task->base.out;
-    // reuse the same DOCA buffers for every block, only updating their data (as dpKernels' clients do)
-    dpm_set_task_lazy_bind_mode(g_task, true);
     g_connected = true;
     return true;
 }
@@ -152,6 +160,7 @@ bool dpk_deflate_decompress(char const* in, size_t in_size, char* out, size_t ou
     g_task->base.in_size = static_cast<uint32_t>(in_size);
     g_task->base.out_size = static_cast<uint32_t>(out_size);
     g_task->base.actual_out_size = 0;
+    g_task->bf3.callback_owner_thread_id = cSubmitThread;
     dpm_submit_task_msgq_blocking(cSubmitThread, g_task, DEVICE_NONE);
     if (DPK_SUCCESS != wait_for(g_task->base.completion) || g_task->base.actual_out_size != out_size)
     {
@@ -176,10 +185,15 @@ void dpk_deflate_exit_if_started(int exit_code) {
                 static_cast<unsigned long long>(g_mismatches)
         );
     }
-    // give the buffers back, or every clp-s run would use up some of dp_manager's shared memory
+    // give the DOCA task and the buffers back, or every clp-s run would use up some of dp_manager's
+    // memory (same order as dpKernels' embedded API)
     g_task->base.in = g_in;
     g_task->base.out = g_out;
-    if (dpm_mem_req* req = dpm_free_mem_buf_async(g_task); nullptr != req) {
+    if (dpm_mem_req* req = dpm_free_task_async_on_thread(g_task, cSubmitThread); nullptr != req) {
+        wait_for(req->completion);
+    }
+    if (dpm_mem_req* req = dpm_free_mem_buf_async_on_thread(g_task, cSubmitThread); nullptr != req)
+    {
         wait_for(req->completion);
     }
     app_free_task_request(g_task);
