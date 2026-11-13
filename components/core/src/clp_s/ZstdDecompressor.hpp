@@ -25,7 +25,7 @@ public:
 
     // Constructor
     /**
-     * Decompresses the block-DEFLATE format written by ZstdCompressor on the BF-3 via dpKernels
+     * Decompresses the block-DEFLATE format written by ZstdCompressor on the BF-3 via DOCA Compress
      */
     ZstdDecompressor();
 

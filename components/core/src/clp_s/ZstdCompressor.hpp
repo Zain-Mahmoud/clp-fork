@@ -14,7 +14,7 @@
 namespace clp_s {
 constexpr int cDefaultCompressionLevel = 3;
 // Uncompressed size of each DEFLATE block. Must not exceed the BF-3 engine's max buffer size
-// (printed by dpKernels at startup as [BF3-DECOMP-CAP] max_buf_size).
+// (DOCA: doca_compress_cap_task_decompress_deflate_get_max_buf_size, 2 MiB on this BF-3).
 constexpr size_t cDeflateBlockSize = 64 * 1024;
 
 class ZstdCompressor : public Compressor {

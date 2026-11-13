@@ -1,8 +1,8 @@
 // Code from CLP
 //
 // Reads the block-DEFLATE format written by ZstdCompressor (see ZstdCompressor.cpp) and
-// decompresses each block on the BlueField-3 decompression engine through dpKernels, one block at
-// a time.
+// decompresses each block on the BlueField-3 decompression engine through DOCA Compress, one block
+// at a time.
 #include "ZstdDecompressor.hpp"
 
 #include <algorithm>
@@ -12,7 +12,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "DpkDeflate.hpp"
+#include "DocaDeflate.hpp"
 #include "ZstdCompressor.hpp"
 
 
@@ -103,7 +103,7 @@ ErrorCode ZstdDecompressor::load_block() {
 
     m_block.resize(uncompressed_size);
     if (false
-        == dpk_deflate_decompress(
+        == doca_deflate_decompress(
                 m_compressed_block.data(),
                 compressed_size,
                 m_block.data(),
@@ -111,7 +111,7 @@ ErrorCode ZstdDecompressor::load_block() {
         ))
     {
         SPDLOG_ERROR(
-                "ZstdDecompressor: dpKernels failed to decompress a {} -> {} byte block",
+                "ZstdDecompressor: DOCA failed to decompress a {} -> {} byte block",
                 compressed_size,
                 uncompressed_size
         );

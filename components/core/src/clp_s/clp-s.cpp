@@ -32,7 +32,6 @@
 #include "../reducer/network_utils.hpp"
 #include "CommandLineArguments.hpp"
 #include "Defs.hpp"
-#include "DpkDeflate.hpp"
 #include "JsonConstructor.hpp"
 #include "JsonParser.hpp"
 #include "kv_ir_search.hpp"
@@ -412,8 +411,7 @@ bool search_archive(
 }
 }  // namespace
 
-namespace {
-int run(int argc, char const* argv[]) {
+int main(int argc, char const* argv[]) {
     try {
         auto stderr_logger = spdlog::stderr_logger_st("stderr");
         spdlog::set_default_logger(stderr_logger);
@@ -597,12 +595,4 @@ int run(int argc, char const* argv[]) {
     }
 
     return 0;
-}
-}  // namespace
-
-int main(int argc, char const* argv[]) {
-    int const exit_code = run(argc, argv);
-    // Skips the exit-time cleanup that crashes when dpKernels was used (see DpkDeflate.hpp).
-    clp_s::dpk_deflate_exit_if_started(exit_code);
-    return exit_code;
 }

@@ -1,18 +1,11 @@
-# ZstdCompressor/ZstdDecompressor use DEFLATE: libdeflate to compress, and dpKernels to decompress
-# on the BlueField-3 hardware engine.
-set(CLP_S_DPK_ROOT "$ENV{HOME}/DP-Kernels" CACHE PATH "Path to a built DP-Kernels checkout")
-find_library(
-        DPK_EMBED_RUNTIME
-        dpk_embed_runtime
-        PATHS "${CLP_S_DPK_ROOT}/build"
-        NO_DEFAULT_PATH
-        REQUIRED
-)
+# ZstdCompressor/ZstdDecompressor use DEFLATE: libdeflate to compress, and DOCA Compress to
+# decompress on the BlueField-3 hardware engine. DOCA's .pc files are found through
+# PKG_CONFIG_PATH (e.g. /opt/mellanox/doca/lib/aarch64-linux-gnu/pkgconfig).
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBDEFLATE REQUIRED IMPORTED_TARGET libdeflate)
-add_library(clp_s_dpk INTERFACE)
-target_include_directories(clp_s_dpk INTERFACE "${CLP_S_DPK_ROOT}/DPManager")
-target_link_libraries(clp_s_dpk INTERFACE "${DPK_EMBED_RUNTIME}" PkgConfig::LIBDEFLATE)
+pkg_check_modules(DOCA REQUIRED IMPORTED_TARGET doca-common doca-compress)
+add_library(clp_s_deflate INTERFACE)
+target_link_libraries(clp_s_deflate INTERFACE PkgConfig::DOCA PkgConfig::LIBDEFLATE)
 
 add_subdirectory(ffi)
 add_subdirectory(filter)
@@ -263,8 +256,8 @@ set(
         TraceableException.hpp
         Utils.cpp
         Utils.hpp
-        DpkDeflate.cpp
-        DpkDeflate.hpp
+        DocaDeflate.cpp
+        DocaDeflate.hpp
         ZstdCompressor.cpp
         ZstdCompressor.hpp
         ZstdDecompressor.cpp
@@ -288,7 +281,7 @@ if(CLP_BUILD_CLP_S_IO)
         target_link_libraries(
                 clp_s_io
                 PUBLIC
-                clp_s_dpk
+                clp_s_deflate
                 simdjson::simdjson
                 zstd::libzstd_static
                 PRIVATE
