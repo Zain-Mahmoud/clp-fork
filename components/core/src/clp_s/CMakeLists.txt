@@ -1,5 +1,6 @@
 # ZstdCompressor/ZstdDecompressor use DEFLATE: libdeflate to compress, and dpKernels to decompress
-# on the BlueField-3 hardware engine.
+# on the BlueField-3 hardware engine, through a dp_manager that is already running. The client
+# functions come from dpKernels' embedded-runtime library; its headers need DOCA's and mimalloc's.
 set(CLP_S_DPK_ROOT "$ENV{HOME}/DP-Kernels" CACHE PATH "Path to a built DP-Kernels checkout")
 find_library(
         DPK_EMBED_RUNTIME
@@ -10,8 +11,17 @@ find_library(
 )
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBDEFLATE REQUIRED IMPORTED_TARGET libdeflate)
+pkg_check_modules(DPK_DOCA_COMMON REQUIRED doca-common)
+pkg_check_modules(DPK_MIMALLOC REQUIRED mimalloc)
 add_library(clp_s_dpk INTERFACE)
-target_include_directories(clp_s_dpk INTERFACE "${CLP_S_DPK_ROOT}/DPManager")
+target_include_directories(
+        clp_s_dpk
+        INTERFACE
+        "${CLP_S_DPK_ROOT}/DPManager"
+        "${CLP_S_DPK_ROOT}/Common"
+        ${DPK_DOCA_COMMON_INCLUDE_DIRS}
+        ${DPK_MIMALLOC_INCLUDE_DIRS}
+)
 target_link_libraries(clp_s_dpk INTERFACE "${DPK_EMBED_RUNTIME}" PkgConfig::LIBDEFLATE)
 
 add_subdirectory(ffi)

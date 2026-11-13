@@ -1,33 +1,39 @@
+// Decompresses DEFLATE blocks through a dp_manager that is already running (dpKernels' run.sh), so
+// each clp-s run connects to it instead of starting its own copy of dpKernels.
 #include "DpkDeflate.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <mutex>
+#include <string>
 #include <vector>
 
-#include <dpk_embed_c_api.h>
+#include <dpm_interface.hpp>
+#include <fcntl.h>
 #include <libdeflate.h>
 #include <spdlog/spdlog.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include "ZstdCompressor.hpp"
 
 namespace clp_s {
 namespace {
-// dpKernels only accepts buffers inside a memory region registered with it, so each block is
-// copied into this region (input area, then output area), decompressed, and copied back out.
-constexpr size_t cRegionIn = cDeflateBlockSize + cDeflateBlockSize / 8 + 4096;
-constexpr size_t cRegionOut = cDeflateBlockSize;
-constexpr size_t cRegionSize = (cRegionIn + cRegionOut + 4095) / 4096 * 4096;
-constexpr uint32_t cSubmitThread = 0;
-constexpr uint32_t cTimeoutMs = 10'000;
+// dp_manager only reads and writes its own shared buffers, so each block is copied into one input
+// buffer, decompressed into one output buffer, and copied back out.
+constexpr uint32_t cBufIn = cDeflateBlockSize + cDeflateBlockSize / 8 + 4096;
+constexpr uint32_t cBufOut = cDeflateBlockSize;
+constexpr int cSubmitThread = 0;
+constexpr auto cTimeout = std::chrono::seconds(10);
 
-char* g_region = nullptr;
-bool g_started = false;  // whether dpKernels' runtime (and its threads) started
-dpk_embed_task_handle* g_task = nullptr;
+bool g_connected = false;  // whether this process got a task and buffers from dp_manager
+dpkernel_task* g_task = nullptr;
+shm_ptr g_in = 0;  // the buffers, as offsets into dp_manager's shared memory
+shm_ptr g_out = 0;
 std::mutex g_mutex;
 
 // CLP_S_DPK_VERIFY=1 (debugging): also decompress every block with libdeflate and report blocks
@@ -77,82 +83,89 @@ void verify(char const* in, size_t in_size, char* out, size_t out_size) {
     std::memcpy(out, expected.data(), out_size);
 }
 
-bool start_dpk() {
-    g_region = static_cast<char*>(std::aligned_alloc(4096, cRegionSize));
-    if (nullptr == g_region) {
+// Waits for dp_manager to finish `status`, giving up after cTimeout (e.g. if it was stopped).
+template <typename Status>
+dpkernel_error wait_for(Status const& status) {
+    auto const deadline = std::chrono::steady_clock::now() + cTimeout;
+    for (uint32_t i = 1;; ++i) {
+        dpkernel_error const s = status.load(std::memory_order_acquire);
+        if (DPK_ONGOING != s) {
+            return s;
+        }
+        if (0 == i % 4096 && std::chrono::steady_clock::now() > deadline) {
+            return DPK_ERROR_FAILED;
+        }
+    }
+}
+
+bool connect_dpk() {
+    // Without a running dp_manager, dpm_frontend_initialize() would create (and fill) its 5 GB of
+    // shared memory itself before failing, so first check that the manager's queues exist.
+    std::string const ring = std::string{RING_BUFFER_SHM_NAME} + "0";
+    int const fd = shm_open(ring.c_str(), O_RDWR, 0);
+    if (fd < 0) {
+        SPDLOG_ERROR("dpKernels: no dp_manager running (start it with DP-Kernels' run.sh)");
         return false;
     }
-    dpk_embed_runtime_config config{};
-    config.io_base = g_region;
-    config.io_bytes = cRegionSize;
-    config.enable_thread_pinning = 0;
-    config.startup_timeout_ms = 30'000;
+    close(fd);
 
-    // dpKernels logs with printf, partly from its own threads; send that to stderr so it doesn't
-    // mix with clp-s's results. Its threads may still be starting (and printing) after
-    // dpk_embed_runtime_start() returns, so keep the redirect until a task is prepared on every
-    // submit thread: each prepare waits for that thread to answer.
+    // dpKernels prints with printf; send that to stderr so it doesn't mix with clp-s's results.
     std::fflush(stdout);
     int const saved_stdout = dup(STDOUT_FILENO);
     dup2(STDERR_FILENO, STDOUT_FILENO);
-    g_started = 0 == dpk_embed_runtime_start(&config);
-    bool ok = g_started
-              && 0 == dpk_embed_task_create(DPK_EMBED_STAGE_DECOMPRESS_DEFLATE, &g_task)
-              && 0 == dpk_embed_task_bind_io_region(
-                      g_task,
-                      reinterpret_cast<uint64_t>(g_region),
-                      static_cast<uint32_t>(cRegionSize)
-              );
-    int const num_threads = ok ? dpk_embed_get_max_submit_threads() : 0;
-    for (int i = 0; ok && i < num_threads; ++i) {
-        ok = 0 == dpk_embed_task_prepare_for_thread(g_task, static_cast<uint32_t>(i));
+    bool ok = dpm_frontend_initialize() && app_alloc_task_request(&g_task);
+    if (ok) {
+        g_task->base.task = TASK_DECOMPRESS_DEFLATE;
+        g_task->base.device = DEVICE_NONE;
+        dpm_mem_req* req = dpm_alloc_mem_buf_async(cBufIn, cBufOut, g_task);
+        ok = nullptr != req && DPK_SUCCESS == wait_for(req->completion);
     }
     std::fflush(stdout);
     dup2(saved_stdout, STDOUT_FILENO);
     close(saved_stdout);
+    if (false == ok) {
+        SPDLOG_ERROR("dpKernels: couldn't get a task and buffers from dp_manager");
+        return false;
+    }
 
-    return ok;
+    g_in = g_task->base.in;
+    g_out = g_task->base.out;
+    // reuse the same DOCA buffers for every block, only updating their data (as dpKernels' clients do)
+    dpm_set_task_lazy_bind_mode(g_task, true);
+    g_connected = true;
+    return true;
 }
 }  // namespace
 
 bool dpk_deflate_decompress(char const* in, size_t in_size, char* out, size_t out_size) {
-    static bool const started = start_dpk();
-    if (false == started) {
-        SPDLOG_ERROR("dpKernels: failed to start the runtime");
-        return false;
-    }
-    if (0 == in_size || in_size > cRegionIn || 0 == out_size || out_size > cRegionOut) {
+    static bool const connected = connect_dpk();
+    if (false == connected || 0 == in_size || in_size > cBufIn || 0 == out_size
+        || out_size > cBufOut)
+    {
         return false;
     }
 
     std::lock_guard<std::mutex> lock{g_mutex};
-    char* hw_in = g_region;
-    char* hw_out = g_region + cRegionIn;
-    std::memcpy(hw_in, in, in_size);
-    uint32_t actual = 0;
-    if (0 != dpk_embed_task_submit_and_wait(
-                g_task,
-                cSubmitThread,
-                reinterpret_cast<uint64_t>(hw_in),
-                static_cast<uint32_t>(in_size),
-                reinterpret_cast<uint64_t>(hw_out),
-                static_cast<uint32_t>(out_size),
-                cTimeoutMs,
-                &actual
-        )
-        || actual != out_size)
+    std::memcpy(app_get_input_ptr_from_shmptr(g_in), in, in_size);
+    g_task->base.in = g_in;
+    g_task->base.out = g_out;
+    g_task->base.in_size = static_cast<uint32_t>(in_size);
+    g_task->base.out_size = static_cast<uint32_t>(out_size);
+    g_task->base.actual_out_size = 0;
+    dpm_submit_task_msgq_blocking(cSubmitThread, g_task, DEVICE_NONE);
+    if (DPK_SUCCESS != wait_for(g_task->base.completion) || g_task->base.actual_out_size != out_size)
     {
         return false;
     }
-    std::memcpy(out, hw_out, out_size);
+    std::memcpy(out, app_get_output_ptr_from_shmptr(g_out), out_size);
     if (g_verify) {
-        verify(hw_in, in_size, out, out_size);
+        verify(in, in_size, out, out_size);
     }
     return true;
 }
 
 void dpk_deflate_exit_if_started(int exit_code) {
-    if (false == g_started) {
+    if (false == g_connected) {
         return;
     }
     if (g_verify) {
@@ -163,6 +176,14 @@ void dpk_deflate_exit_if_started(int exit_code) {
                 static_cast<unsigned long long>(g_mismatches)
         );
     }
+    // give the buffers back, or every clp-s run would use up some of dp_manager's shared memory
+    g_task->base.in = g_in;
+    g_task->base.out = g_out;
+    if (dpm_mem_req* req = dpm_free_mem_buf_async(g_task); nullptr != req) {
+        wait_for(req->completion);
+    }
+    app_free_task_request(g_task);
+
     std::cout.flush();
     std::cerr.flush();
     std::fflush(nullptr);
